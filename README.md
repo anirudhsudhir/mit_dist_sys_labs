@@ -1,6 +1,6 @@
 # MIT 6.5840 Distributed Systems Labs
 
-A series of labs accompanying the coursework on distributed systems.
+A series of labs accompanying the [coursework on distributed systems](https://pdos.csail.mit.edu/6.824/index.html).
 This repo holds my solutions to these labs.
 
 ## Labs
@@ -11,9 +11,27 @@ This repo holds my solutions to these labs.
 
 This lab involves building a key/value server for a single machine that ensures that each operation is executed exactly once despite network failures and that the operations are linearizable.
 
-The solution passes all the tests.
+The solution is present in `kvsrv/{client.go,server.go,common.go}` and passes all tests.
 
 ### 3. Raft
+
+This lab involves implementing Raft, a replicated state machine protocol.
+
+The solution is present in `raft/raft.go`
+
+#### 3A: Leader election
+
+Implement Raft leader election and heartbeats.
+The goal for Part 3A is for a single leader to be elected, for the leader to remain the leader if there are no failures, and for a new leader to take over if the old leader fails or if packets to/from the old leader are lost.
+
+The solution passes all tests.
+
+---
+
+## Note
+
+- `labrpc` and `labgob` are packages provided by MIT for performing RPCs. The tester can tell `labrpc` to delay RPCs, re-order them, and discard them to simulate various network failures.
+- `porcupine` and `models` are packages used for testing labs
 
 ---
 
@@ -34,3 +52,5 @@ The solution passes all the tests.
 
 - If a duplicate `Append` request is received, use strings.Split to split the value of the given key and return the value expected before this `Append`(As a concurrent update might have appended another value, hence the value expected before this `Append` might be different from the current value on the server)
 - This solution was suitable here as `Append` requests involved unique strings. Dealing with non-unique `Append`s might require a better solution
+
+---
