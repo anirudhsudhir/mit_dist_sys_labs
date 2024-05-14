@@ -66,29 +66,28 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// me: to be persisted
-	currentTerm int        //initialized to 0
+	currentTerm int        // initialized to 0
 	votedFor    int        // intialized to -1
-	log         []LogEntry //indexed from 1
+	log         []LogEntry // indexed from 1
 
 	// me: volatile state for all servers
-	commitIndex int //initialized to 0
-	lastApplied int //initialized to 0
+	commitIndex int // initialized to 0
+	lastApplied int // initialized to 0
 
 	// me: volatile state for leaders
 	nextIndex  []int // initialized to last leader log + 1
-	matchIndex []int //initialized to 0
+	matchIndex []int // initialized to 0
 
 	// me: additional variables
 	receivedHeartbeatOrVoteGrant bool
 	currentRole                  serverCurrentRole
-	currentLeader                int   //intialized to -1
+	currentLeader                int   // intialized to -1
 	votesReceived                []int // stores the index of the server in peer[]
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (3A).
@@ -101,9 +100,10 @@ func (rf *Raft) GetState() (int, bool) {
 	if rf.currentRole == Leader {
 		isleader = true
 		// log.Printf("%d knows it is the leader in term %d", rf.me, rf.currentTerm)
-	} else {
-		// log.Printf("%d knows it is not the leader in term %d", rf.me, rf.currentTerm)
 	}
+	//  else {
+	// 	log.Printf("%d knows it is not the leader in term %d", rf.me, rf.currentTerm)
+	// }
 	return term, isleader
 }
 
@@ -151,7 +151,6 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
 }
 
 // example RequestVote RPC arguments structure.
@@ -291,7 +290,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
@@ -308,26 +307,27 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		serverRole := rf.currentRole
 		rf.mu.Unlock()
+
 		for serverRole == Leader && !rf.killed() {
 			ms := 50 + (rand.Int63() % 300)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+
 			rf.mu.Lock()
 			serverRole = rf.currentRole
 			rf.mu.Unlock()
 		}
 
 		var args *RequestVoteArgs
-		var continueElection = false
+		continueElection := false
 
 		rf.mu.Lock()
+
 		if !rf.receivedHeartbeatOrVoteGrant {
 			rf.currentRole = Candidate
 			rf.currentTerm += 1
 			rf.votedFor = rf.me
 			rf.votesReceived = rf.votesReceived[:0]
-			if !slices.Contains(rf.votesReceived, rf.me) {
-				rf.votesReceived = append(rf.votesReceived, rf.me)
-			}
+			rf.votesReceived = append(rf.votesReceived, rf.me)
 			continueElection = true
 
 			args = &RequestVoteArgs{
@@ -355,7 +355,7 @@ func (rf *Raft) ticker() {
 		if continueElection {
 			for targetPeerIndex := range len(rf.peers) {
 				// me: rf.me does not change, hence no locks required
-				if !(targetPeerIndex == rf.me) {
+				if targetPeerIndex != rf.me {
 					go rf.PerformVoteRequest(targetPeerIndex, args)
 				}
 			}
@@ -365,11 +365,13 @@ func (rf *Raft) ticker() {
 			time.Sleep(time.Duration(electionTimer) * time.Millisecond)
 
 			rf.mu.Lock()
+
 			if rf.currentRole == Candidate {
 				// me: start new election
 				rf.mu.Unlock()
 				continue
 			}
+
 			rf.mu.Unlock()
 		}
 
@@ -386,7 +388,8 @@ func (rf *Raft) ticker() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg,
+) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -410,8 +413,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // me: This struct stores a particular log entry
 type LogEntry struct {
-	Term    int
 	Command interface{}
+	Term    int
 }
 
 // me: This struct holds the server state(follower, candidate or leader)
@@ -428,7 +431,6 @@ type AppendEntriesArgs struct {
 	Term     int
 	LeaderId int
 	// TODO: FILL MISSING FIELDS
-	//
 	// Entries []LogEntry
 }
 
@@ -444,25 +446,31 @@ func (rf *Raft) PerformVoteRequest(targetPeerIndex int, args *RequestVoteArgs) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	if rf.currentRole == Follower || rf.currentRole == Leader || !receivedReply {
 		return
 	}
+
 	if reply.Term == rf.currentTerm && reply.VoteGranted {
 		if !slices.Contains(rf.votesReceived, targetPeerIndex) {
 			rf.votesReceived = append(rf.votesReceived, targetPeerIndex)
 		}
-		if len(rf.votesReceived) >= int(math.Ceil(float64((len(rf.peers)+1)/2))) {
+
+		// me: ensuring votes received is greater than quorum
+		if len(rf.votesReceived) >= int(math.Ceil(float64(len(rf.peers)+1)/2)) {
 			// log.Printf("%d HAS BECOME LEADER, votedFor : %+v", rf.me, rf.votesReceived)
 			rf.currentRole = Leader
 			rf.currentLeader = rf.me
 			rf.nextIndex = rf.nextIndex[:0]
 			rf.matchIndex = rf.matchIndex[:0]
+
 			for follower := range len(rf.peers) {
-				if !(follower == rf.me) {
+				if follower != rf.me {
 					rf.nextIndex = append(rf.nextIndex, len(rf.log))
 					rf.matchIndex = append(rf.matchIndex, 0)
 				}
 			}
+
 			go rf.sendHeartBeats()
 		}
 
@@ -473,7 +481,6 @@ func (rf *Raft) PerformVoteRequest(targetPeerIndex int, args *RequestVoteArgs) {
 		// me: setting length to 0 while retaining allocated memory
 		rf.votesReceived = rf.votesReceived[:0]
 	}
-
 }
 
 // me: sends heartbeats at random intervals during idle
@@ -481,10 +488,7 @@ func (rf *Raft) sendHeartBeats() {
 	for !rf.killed() {
 
 		for follower := range len(rf.peers) {
-
-			if !(follower == rf.me) {
-				rf.mu.Lock()
-				rf.mu.Unlock()
+			if follower != rf.me {
 				rf.sendAppendEntries(rf.me, follower)
 			}
 		}
@@ -495,6 +499,7 @@ func (rf *Raft) sendHeartBeats() {
 		rf.mu.Lock()
 		serverRole := rf.currentRole
 		rf.mu.Unlock()
+
 		if serverRole != Leader {
 			break
 		}
@@ -516,10 +521,12 @@ func (rf *Raft) sendAppendEntries(leaderPeerIndex int, followerPeerIndex int) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	if rf.currentTerm < reply.Term {
 		rf.currentTerm = reply.Term
 		rf.currentRole = Follower
 		rf.votedFor = -1
+
 		// me: setting length to 0 while retaining allocated memory
 		rf.votesReceived = rf.votesReceived[:0]
 	}
@@ -530,6 +537,7 @@ func (rf *Raft) sendAppendEntries(leaderPeerIndex int, followerPeerIndex int) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
