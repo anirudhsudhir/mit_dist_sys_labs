@@ -71,6 +71,11 @@ type Raft struct {
 	log         []LogEntry // indexed from 1
 
 	// me: volatile state for all servers
+	// commitIndex == lastApplied for leaders
+	// for other nodes, commitIndex updated during heartbeats or log replication
+	// lastApplied updated after entries are committed
+	//
+	// me: initialised to 0, when logs are committed, empty log[0] is ignored
 	commitIndex int // initialized to 0
 	lastApplied int // initialized to 0
 
@@ -81,8 +86,9 @@ type Raft struct {
 	// me: additional variables
 	receivedHeartbeatOrVoteGrant bool
 	currentRole                  serverCurrentRole
-	currentLeader                int   // intialized to -1
-	votesReceived                []int // stores the index of the server in peer[]
+	currentLeader                int            // intialized to -1
+	votesReceived                []int          // stores the index of the server in peer[]
+	applyChChan                  *chan ApplyMsg // channel to send committed entries
 }
 
 // return currentTerm and whether this server
@@ -263,9 +269,25 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
 	// Your code here (3B).
+	rf.mu.Lock()
+
+	if rf.currentRole == Leader {
+		index = rf.commitIndex + 1
+		term = rf.currentTerm
+		isLeader = true
+
+		go rf.performLogBroadcast(command)
+
+		log.Printf("Starting agreement(append) %d on node %d", index, rf.me)
+		rf.mu.Unlock()
+		log.Printf("Leader %d is dead? - %t", rf.me, rf.killed())
+		rf.mu.Lock()
+	}
+
+	rf.mu.Unlock()
 
 	return index, term, isLeader
 }
@@ -297,10 +319,9 @@ func (rf *Raft) ticker() {
 
 		// me: handles the entirety of leader election
 
-		// pause for a random amount of time between 200 and 500
-		// milliseconds.
+		// pause for a random amount of time between 200 and 400 ms
 		// me: Wait for heartbeat or RequestVope RPCs
-		ms := 200 + (rand.Int63() % 300)
+		ms := 200 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
 		// me: if current server is the leader, prevent election start
@@ -309,7 +330,9 @@ func (rf *Raft) ticker() {
 		rf.mu.Unlock()
 
 		for serverRole == Leader && !rf.killed() {
-			ms := 50 + (rand.Int63() % 300)
+			// me: Sleep for 200 to 400 ms before checking if current node is leader
+			// me: if current node is leader, repeat process
+			ms := 200 + (rand.Int63() % 200)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 
 			rf.mu.Lock()
@@ -360,8 +383,8 @@ func (rf *Raft) ticker() {
 				}
 			}
 
-			// me: Election timeout - Waits for a round of election
-			electionTimer := 50 + (rand.Int63() % 100)
+			// me: Election timeout - Waits for a round of election for 100 to 200ms
+			electionTimer := 100 + (rand.Int63() % 200)
 			time.Sleep(time.Duration(electionTimer) * time.Millisecond)
 
 			rf.mu.Lock()
@@ -399,6 +422,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentRole = Follower
 	rf.votedFor = -1
 	rf.currentLeader = -1
+	rf.applyChChan = &applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -428,10 +452,12 @@ const (
 )
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
-	// TODO: FILL MISSING FIELDS
-	// Entries []LogEntry
+	Term          int
+	LeaderId      int
+	PrevLogLength int
+	PrevLogTerm   int
+	Entries       []LogEntry
+	LeaderCommit  int
 }
 
 type AppendEntriesReply struct {
@@ -464,11 +490,9 @@ func (rf *Raft) PerformVoteRequest(targetPeerIndex int, args *RequestVoteArgs) {
 			rf.nextIndex = rf.nextIndex[:0]
 			rf.matchIndex = rf.matchIndex[:0]
 
-			for follower := range len(rf.peers) {
-				if follower != rf.me {
-					rf.nextIndex = append(rf.nextIndex, len(rf.log))
-					rf.matchIndex = append(rf.matchIndex, 0)
-				}
+			for range len(rf.peers) {
+				rf.nextIndex = append(rf.nextIndex, len(rf.log))
+				rf.matchIndex = append(rf.matchIndex, 0)
 			}
 
 			go rf.sendHeartBeats()
@@ -489,10 +513,11 @@ func (rf *Raft) sendHeartBeats() {
 
 		for follower := range len(rf.peers) {
 			if follower != rf.me {
-				rf.sendAppendEntries(rf.me, follower)
+				rf.replicateLog(rf.me, follower)
 			}
 		}
 
+		// me: Wait between 150 and 250ms to send heartbeats (4 to 5 heartbeats per second)
 		ms := 150 + (rand.Int63() % 100)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
@@ -507,45 +532,235 @@ func (rf *Raft) sendHeartBeats() {
 }
 
 // me: performs a log replication request or heartbeat
-// TODO: ADD LOG REPLICATION; ONLY SUPPORTS HEARTBEATS CURRENTLY
-func (rf *Raft) sendAppendEntries(leaderPeerIndex int, followerPeerIndex int) {
+func (rf *Raft) replicateLog(leaderPeerIndex int, followerPeerIndex int) {
+	if rf.killed() {
+		return
+	}
+	// me: preparing RPC request
 	var reply AppendEntriesReply
 	rf.mu.Lock()
+
 	args := &AppendEntriesArgs{
-		Term:     rf.currentTerm,
-		LeaderId: leaderPeerIndex,
+		Term:         rf.currentTerm,
+		LeaderId:     leaderPeerIndex,
+		LeaderCommit: rf.commitIndex,
 	}
+
+	// me: avoiding unnecessary operations for empty logs
+	if len(rf.log) > 0 {
+		// me: PrevLogLength holds the length of the expected follower log before append
+		args.PrevLogLength = rf.nextIndex[followerPeerIndex]
+
+		for i := args.PrevLogLength; i < len(rf.log); i++ {
+			args.Entries = append(args.Entries, rf.log[i])
+		}
+
+		if args.PrevLogLength >= 2 {
+			args.PrevLogTerm = rf.log[args.PrevLogLength-1].Term
+		}
+
+		// if len(args.Entries) > 0 {
+		// log.Printf("Sending AppendEntry RPC to follower %d to commit log %d", followerPeerIndex, len(rf.log)-1)
+		// }
+
+	}
+
 	rf.mu.Unlock()
+	// log.Printf("Sending AppendEntry RPC from leader: %d to follower %d, commitIndex: %d", leaderPeerIndex, followerPeerIndex, args.LeaderCommit)
+	receivedReply := rf.peers[followerPeerIndex].Call("Raft.AppendEntries", args, &reply)
 
-	rf.peers[followerPeerIndex].Call("Raft.AppendEntries", args, &reply)
+	if receivedReply {
+		rf.mu.Lock()
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+		if rf.currentTerm == reply.Term && rf.currentRole == Leader && len(args.Entries) > 0 {
+			// log.Println("Receving AppendEntries reply for log append")
+			if reply.Success {
+				// log.Printf("Received acknowlegdement from node: %d", followerPeerIndex)
+				rf.nextIndex[followerPeerIndex] = len(rf.log)
+				rf.matchIndex[followerPeerIndex] = len(rf.log) - 1
+				rf.matchIndex[rf.me] = rf.matchIndex[followerPeerIndex]
+				rf.mu.Unlock()
+				rf.applyLeaderLogEntries()
+				rf.mu.Lock()
+			} else if rf.nextIndex[followerPeerIndex] > 0 {
+				rf.nextIndex[followerPeerIndex] -= 1
+				log.Println("INVOKING APPENENTRIES RECURSIVELY")
+				rf.replicateLog(leaderPeerIndex, followerPeerIndex)
+			}
+		} else if rf.currentTerm < reply.Term {
+			rf.currentTerm = reply.Term
+			rf.currentRole = Follower
+			rf.votedFor = -1
+			rf.receivedHeartbeatOrVoteGrant = true
 
-	if rf.currentTerm < reply.Term {
-		rf.currentTerm = reply.Term
-		rf.currentRole = Follower
-		rf.votedFor = -1
+			// me: setting length to 0 while retaining allocated memory
+			rf.votesReceived = rf.votesReceived[:0]
+		}
 
-		// me: setting length to 0 while retaining allocated memory
-		rf.votesReceived = rf.votesReceived[:0]
+		rf.mu.Unlock()
 	}
 }
 
 // me: handles an AppendEntries RPC
-// TODO: ADD LOG REPLICATION; ONLY SUPPORTS HEARTBEATS CURRENTLY
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+	// log.Printf("Received AppendEntries RPC on node %d, node dead: %t", rf.me, rf.killed())
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
-	} else {
-		rf.receivedHeartbeatOrVoteGrant = true
-		rf.currentLeader = args.LeaderId
+	reply.Term = args.Term
+	reply.Success = false
+	rf.receivedHeartbeatOrVoteGrant = true
 
-		reply.Term = args.Term
+	if args.Term > rf.currentTerm {
+		rf.votedFor = -1
+		rf.currentTerm = args.Term
+	} else if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		rf.receivedHeartbeatOrVoteGrant = false
+		return
+	}
+
+	if rf.commitIndex < args.LeaderCommit {
+		rf.commitIndex = args.LeaderCommit
+	}
+
+	if args.Term == rf.currentTerm {
+		rf.currentLeader = args.LeaderId
+		rf.currentRole = Follower
+	}
+
+	if len(args.Entries) > 0 {
+		// log.Println("Receiving AppendEntries request for log append")
+		logOk := (args.PrevLogLength >= len(rf.log)) && (args.PrevLogLength == 0 || (args.PrevLogTerm >= rf.log[args.PrevLogLength-1].Term))
+
+		// log.Println("Receiving AppendEntries request for log append, logOk: ", logOk)
+		if rf.currentTerm == args.Term && logOk {
+			// log.Printf("Receiving AppendEntries request for prev log length of %d : Successful ", len(rf.log))
+			rf.mu.Unlock()
+			rf.addEntriesToLog(args.PrevLogLength, args.Entries)
+			rf.mu.Lock()
+			reply.Success = true
+			// log.Println("Receiving AppendEntries request for log append: Successful 2")
+		}
+	} else {
 		reply.Success = true
+	}
+
+	go rf.applyFollowerLogEntries()
+}
+
+// me: This function appends and entry to the leader's log and broadcasts it to all nodes
+func (rf *Raft) performLogBroadcast(command interface{}) {
+	rf.mu.Lock()
+
+	logEntry := LogEntry{
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+
+	if len(rf.log) == 0 {
+		rf.log = append(rf.log, LogEntry{})
+	}
+	rf.log = append(rf.log, logEntry)
+	rf.nextIndex[rf.me] = len(rf.log)
+
+	rf.mu.Unlock()
+
+	for node := range rf.peers {
+		if node != rf.me {
+			// me: Sending concurrent log repliaction requests to all nodes
+			go rf.replicateLog(rf.me, node)
+		}
+	}
+}
+
+// me: This function adds or tuncates entries to followers log accordingly
+func (rf *Raft) addEntriesToLog(PrevLogLength int, suffixEntries []LogEntry) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// me: ensuring the existing log entries in the follower are identical to that of the leader
+	// me: if the logs do not match, truncate it
+	if len(rf.log) > PrevLogLength {
+		lowIndex := int(math.Min(float64(len(rf.log)), float64(PrevLogLength+len(suffixEntries))) - 1)
+		if rf.log[lowIndex].Term != suffixEntries[lowIndex-PrevLogLength].Term {
+			rf.log = rf.log[:PrevLogLength-1]
+		}
+	}
+
+	// me: appending new entries to the follower's log
+	if PrevLogLength+len(suffixEntries) > len(rf.log) {
+		// log.Printf("Adding entry to log on node: %d", rf.me)
+		for i := len(rf.log) - PrevLogLength; i < len(suffixEntries); i++ {
+			rf.log = append(rf.log, suffixEntries[i])
+		}
+	}
+
+}
+
+// me: This function commits log entries on the leader
+// for the leader, lastApplied == commitIndex as commitIndex is calculated in the this function
+func (rf *Raft) applyLeaderLogEntries() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	latestCommit := -1
+	quorumNodes := int(math.Ceil(float64(len(rf.peers)+1) / 2))
+	for i := 1; i < len(rf.log); i++ {
+		updatedNodes := 0
+
+		for j := 0; j < len(rf.peers); j++ {
+			if rf.matchIndex[j] >= i {
+				updatedNodes++
+			}
+		}
+
+		if updatedNodes >= quorumNodes {
+			// log.Printf("Updating latestCommit from %d to %d", latestCommit, i)
+			latestCommit = i
+		} else {
+			// log.Printf("Unable to update latestCommit from %d to %d, updatedNodes: %d", latestCommit, i, updatedNodes)
+		}
+	}
+
+	log.Printf("LEADER: Quorum: %d, latestCommit: %d, rf.commitIndex: %d, len(rf.log): %d", quorumNodes, latestCommit, rf.commitIndex, len(rf.log))
+	if latestCommit != -1 && latestCommit > rf.commitIndex && rf.log[latestCommit].Term == rf.currentTerm {
+		for i := rf.commitIndex + 1; i <= latestCommit; i++ {
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i,
+			}
+
+			*rf.applyChChan <- applyMsg
+			log.Printf("Applied %d to leader %d ", i, rf.me)
+		}
+
+		rf.commitIndex = latestCommit
+		rf.lastApplied = latestCommit
+	}
+}
+
+// me: committing log entries committed by the leader on follower nodes
+func (rf *Raft) applyFollowerLogEntries() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	log.Printf("Starting entry application on follower %d, rf.commitIndex: %d, rf.lastApplied: %d", rf.me, rf.commitIndex, rf.lastApplied)
+
+	if rf.commitIndex > rf.lastApplied && len(rf.log) > rf.commitIndex {
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i,
+			}
+
+			*rf.applyChChan <- applyMsg
+			log.Printf("Committed %d to node %d ", i, rf.me)
+		}
+
+		rf.lastApplied = rf.commitIndex
 	}
 }
