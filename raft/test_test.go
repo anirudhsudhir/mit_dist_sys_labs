@@ -8,12 +8,15 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"log"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -191,6 +194,7 @@ func TestFollowerFailure3B(t *testing.T) {
 
 	// disconnect one follower from the network.
 	leader1 := cfg.checkOneLeader()
+	log.Println("removing a follower")
 	cfg.disconnect((leader1 + 1) % servers)
 
 	// the leader and remaining follower should be
@@ -201,6 +205,7 @@ func TestFollowerFailure3B(t *testing.T) {
 
 	// disconnect the remaining follower
 	leader2 := cfg.checkOneLeader()
+	log.Println("removing another follower")
 	cfg.disconnect((leader2 + 1) % servers)
 	cfg.disconnect((leader2 + 2) % servers)
 
