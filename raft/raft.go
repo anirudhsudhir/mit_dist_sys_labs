@@ -89,6 +89,61 @@ type Raft struct {
 	currentLeader                int            // intialized to -1
 	votesReceived                []int          // stores the index of the server in peer[]
 	applyChChan                  *chan ApplyMsg // channel to send committed entries
+
+	// me: condition variable to indicate when entries must be applied to the state machine
+	applyEntriesCondVar *sync.Cond
+
+	debugStartTime time.Time
+}
+
+// example RequestVote RPC arguments structure.
+// field names must start with capital letters!
+type RequestVoteArgs struct {
+	// Your data here (3A, 3B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
+}
+
+// example RequestVote RPC reply structure.
+// field names must start with capital letters!
+type RequestVoteReply struct {
+	// Your data here (3A).
+	Term        int
+	VoteGranted bool
+}
+
+// Custom types and methods
+
+// me: This struct stores a particular log entry
+type LogEntry struct {
+	Command interface{}
+	Term    int
+}
+
+// me: This struct holds the server state(follower, candidate or leader)
+type serverCurrentRole int
+
+// me: defining enumerated values for serverCurrentRole
+const (
+	Follower serverCurrentRole = iota + 1
+	Candidate
+	Leader
+)
+
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
 }
 
 // return currentTerm and whether this server
@@ -102,15 +157,23 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
 
-	// log.Printf("%d checking if it is the leader in term %d", rf.me, rf.currentTerm)
 	if rf.currentRole == Leader {
 		isleader = true
-		// log.Printf("%d knows it is the leader in term %d", rf.me, rf.currentTerm)
 	}
-	//  else {
-	// 	log.Printf("%d knows it is not the leader in term %d", rf.me, rf.currentTerm)
-	// }
 	return term, isleader
+}
+
+func (rf *Raft) GetCurrentRole(role serverCurrentRole) string {
+	switch role {
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	case Leader:
+		return "Leader"
+	}
+
+	return ""
 }
 
 // save Raft's persistent state to stable storage,
@@ -159,63 +222,41 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 }
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Your data here (3A).
-	Term        int
-	VoteGranted bool
-}
-
-// example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// me: logging response
-	defer func() {
-		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-		// log.Printf("RequestVote RPC, Sender(Wishes to be leader): %d, Receiver: %d, Term: %d, Success: %t, Voted For: %d\n", args.CandidateId, rf.me, reply.Term, reply.VoteGranted, rf.votedFor)
-	}()
-
 	if args.Term < rf.currentTerm {
+		Debug(rf.debugStartTime, dRequestVoteHandler, rf.me, rf.GetCurrentRole(rf.currentRole), "Failed to granting vote to request with args = %+v", args)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	} else {
 		if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-			rf.currentRole = Follower
-			rf.votedFor = -1
+			rf.mu.Unlock()
+			rf.transitionToFollower(args.Term)
+			rf.mu.Lock()
 		}
 
+		lastLogIndex := 0
 		lastLogTerm := 0
 		if len(rf.log) >= 2 {
-			lastLogTerm = rf.log[len(rf.log)-1].Term
+			lastLogIndex = len(rf.log) - 1
+			lastLogTerm = rf.log[lastLogIndex].Term
 		}
 
-		argsLogLength := 0
-		if args.LastLogIndex >= 1 {
-			argsLogLength = args.LastLogIndex + 1
-		}
-
-		logOk := args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && argsLogLength >= len(rf.log))
+		// me: election safety restriction
+		// log of the candidate requesting vote must be up to date or greater than the current follower's log
+		logOk := args.LastLogTerm >= lastLogTerm && args.LastLogIndex >= lastLogIndex
+		Debug(rf.debugStartTime, dRequestVoteHandler, rf.me, rf.GetCurrentRole(rf.currentRole), "Checking vote request with args = %+v, current node lastLogTerm = %d, lastLogIndex= %d, logOk:= %v", args, lastLogTerm, lastLogIndex, logOk)
 		if args.Term == rf.currentTerm && logOk && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+			Debug(rf.debugStartTime, dRequestVoteHandler, rf.me, rf.GetCurrentRole(rf.currentRole), "Granting vote to request with args = %+v", args)
 			reply.VoteGranted = true
 			reply.Term = rf.currentTerm
 			rf.votedFor = args.CandidateId
 			rf.receivedHeartbeatOrVoteGrant = true
 		} else {
+			Debug(rf.debugStartTime, dRequestVoteHandler, rf.me, rf.GetCurrentRole(rf.currentRole), "Failed to grant vote to request with args = %+v", args)
 			reply.VoteGranted = false
 			reply.Term = rf.currentTerm
 		}
@@ -275,16 +316,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 
 	if rf.currentRole == Leader {
+
 		index = rf.commitIndex + 1
 		term = rf.currentTerm
 		isLeader = true
+		Debug(rf.debugStartTime, dStart, rf.me, rf.GetCurrentRole(rf.currentRole), "Starting agreement on new entry, cmd = %+v", command)
 
 		go rf.performLogBroadcast(command)
-
-		log.Printf("Starting agreement(append) %d on node %d", index, rf.me)
-		rf.mu.Unlock()
-		log.Printf("Leader %d is dead? - %t", rf.me, rf.killed())
-		rf.mu.Lock()
 	}
 
 	rf.mu.Unlock()
@@ -413,7 +451,10 @@ func (rf *Raft) ticker() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg,
 ) *Raft {
+	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
+
 	rf := &Raft{}
+	rf.debugStartTime = time.Now()
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -424,45 +465,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentLeader = -1
 	rf.applyChChan = &applyCh
 
+	rf.applyEntriesCondVar = sync.NewCond(&rf.mu)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
+	// me: applying entries to the state machine in a separate goroutine
+	go rf.applyLogEntries()
+
 	return rf
-}
-
-// Custom types and methods
-
-// me: This struct stores a particular log entry
-type LogEntry struct {
-	Command interface{}
-	Term    int
-}
-
-// me: This struct holds the server state(follower, candidate or leader)
-type serverCurrentRole int
-
-// me: defining enumerated values for serverCurrentRole
-const (
-	Follower serverCurrentRole = iota + 1
-	Candidate
-	Leader
-)
-
-type AppendEntriesArgs struct {
-	Term          int
-	LeaderId      int
-	PrevLogLength int
-	PrevLogTerm   int
-	Entries       []LogEntry
-	LeaderCommit  int
-}
-
-type AppendEntriesReply struct {
-	Term    int
-	Success bool
 }
 
 // me: sends a vote request to a particular node and processes the response
@@ -471,9 +485,9 @@ func (rf *Raft) PerformVoteRequest(targetPeerIndex int, args *RequestVoteArgs) {
 	receivedReply := rf.sendRequestVote(targetPeerIndex, args, &reply)
 
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	if rf.currentRole == Follower || rf.currentRole == Leader || !receivedReply {
+		rf.mu.Unlock()
 		return
 	}
 
@@ -484,14 +498,25 @@ func (rf *Raft) PerformVoteRequest(targetPeerIndex int, args *RequestVoteArgs) {
 
 		// me: ensuring votes received is greater than quorum
 		if len(rf.votesReceived) >= int(math.Ceil(float64(len(rf.peers)+1)/2)) {
-			// log.Printf("%d HAS BECOME LEADER, votedFor : %+v", rf.me, rf.votesReceived)
 			rf.currentRole = Leader
 			rf.currentLeader = rf.me
+			Debug(rf.debugStartTime, dVote, rf.me, rf.GetCurrentRole(rf.currentRole), "NODE HAS BECOME LEADER!")
+
 			rf.nextIndex = rf.nextIndex[:0]
 			rf.matchIndex = rf.matchIndex[:0]
 
+			nextLogIndex := -1
+			if len(rf.log) == 0 {
+				nextLogIndex = 1
+			} else {
+				// me: a log with entries will contain a dummy entry at index 0
+				// hence, len(rf.log) of the log is (1 + actual entries)
+				// length of the log = last log index = len(rf.log)-1
+				// therefore, nextLogIndex = len(rf.log)
+				nextLogIndex = len(rf.log)
+			}
 			for range len(rf.peers) {
-				rf.nextIndex = append(rf.nextIndex, len(rf.log))
+				rf.nextIndex = append(rf.nextIndex, nextLogIndex)
 				rf.matchIndex = append(rf.matchIndex, 0)
 			}
 
@@ -499,12 +524,12 @@ func (rf *Raft) PerformVoteRequest(targetPeerIndex int, args *RequestVoteArgs) {
 		}
 
 	} else if reply.Term > rf.currentTerm {
-		rf.currentTerm = reply.Term
-		rf.currentRole = Follower
-		rf.votedFor = -1
-		// me: setting length to 0 while retaining allocated memory
-		rf.votesReceived = rf.votesReceived[:0]
+		rf.mu.Unlock()
+		rf.transitionToFollower(reply.Term)
+		return
 	}
+
+	rf.mu.Unlock()
 }
 
 // me: sends heartbeats at random intervals during idle
@@ -513,7 +538,8 @@ func (rf *Raft) sendHeartBeats() {
 
 		for follower := range len(rf.peers) {
 			if follower != rf.me {
-				rf.replicateLog(rf.me, follower)
+				// me: sending heartbeats in parallel
+				go rf.replicateLog(rf.me, follower)
 			}
 		}
 
@@ -536,9 +562,15 @@ func (rf *Raft) replicateLog(leaderPeerIndex int, followerPeerIndex int) {
 	if rf.killed() {
 		return
 	}
+
 	// me: preparing RPC request
 	var reply AppendEntriesReply
 	rf.mu.Lock()
+
+	if rf.currentRole != Leader {
+		rf.mu.Unlock()
+		return
+	}
 
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -549,52 +581,85 @@ func (rf *Raft) replicateLog(leaderPeerIndex int, followerPeerIndex int) {
 	// me: avoiding unnecessary operations for empty logs
 	if len(rf.log) > 0 {
 		// me: PrevLogLength holds the length of the expected follower log before append
-		args.PrevLogLength = rf.nextIndex[followerPeerIndex]
+		// Length of the log includes the actual commands, starting from index 1
+		// It does not include the dummy log at index 0
+		// The length of the log is therefore the same as the last log index
 
-		for i := args.PrevLogLength; i < len(rf.log); i++ {
+		args.PrevLogIndex = rf.nextIndex[followerPeerIndex] - 1
+
+		for i := rf.nextIndex[followerPeerIndex]; i < len(rf.log); i++ {
 			args.Entries = append(args.Entries, rf.log[i])
 		}
 
-		if args.PrevLogLength >= 2 {
-			args.PrevLogTerm = rf.log[args.PrevLogLength-1].Term
+		if args.PrevLogIndex >= 1 {
+			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 		}
-
-		// if len(args.Entries) > 0 {
-		// log.Printf("Sending AppendEntry RPC to follower %d to commit log %d", followerPeerIndex, len(rf.log)-1)
-		// }
-
 	}
 
+	Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Sending AppendEntriesRPC to node %d with PrevLogIndex = %d, PrevLogTerm = %d", followerPeerIndex, args.PrevLogIndex, args.PrevLogTerm)
 	rf.mu.Unlock()
-	// log.Printf("Sending AppendEntry RPC from leader: %d to follower %d, commitIndex: %d", leaderPeerIndex, followerPeerIndex, args.LeaderCommit)
-	receivedReply := rf.peers[followerPeerIndex].Call("Raft.AppendEntries", args, &reply)
 
+	receivedReply := rf.peers[followerPeerIndex].Call("Raft.AppendEntries", args, &reply)
 	if receivedReply {
 		rf.mu.Lock()
 
 		if rf.currentTerm == reply.Term && rf.currentRole == Leader && len(args.Entries) > 0 {
-			// log.Println("Receving AppendEntries reply for log append")
+			Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Received reply to AppendEntriesRPC is %+v for PrevLogIndex = %d, PrevLogTerm = %d", reply, args.PrevLogIndex, args.PrevLogTerm)
 			if reply.Success {
-				// log.Printf("Received acknowlegdement from node: %d", followerPeerIndex)
-				rf.nextIndex[followerPeerIndex] = len(rf.log)
-				rf.matchIndex[followerPeerIndex] = len(rf.log) - 1
-				rf.matchIndex[rf.me] = rf.matchIndex[followerPeerIndex]
+
+				rf.matchIndex[followerPeerIndex] = args.PrevLogIndex + len(args.Entries)
+				rf.nextIndex[followerPeerIndex] = args.PrevLogIndex + len(args.Entries) + 1
+
+				Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Successful AppendEntriesRPC to node %d, nextIndex of nodes = %+v", followerPeerIndex, rf.nextIndex)
+
+				// me: checking if entry has been applied to quorum
+				//
+				// last log index of leader
+				lastLogIndex := len(rf.log) - 1
+
+				if lastLogIndex > rf.commitIndex {
+					quorumNodes := int(math.Ceil(float64(len(rf.peers)+1) / 2))
+					N := -1
+
+					// me: looping from index 1 to find highest log index across all nodes
+					for i := 1; i <= lastLogIndex; i++ {
+						fullyReplicatedNodes := 0
+						for _, nodeLatestIndex := range rf.matchIndex {
+							if nodeLatestIndex >= i {
+								fullyReplicatedNodes++
+							}
+						}
+
+						if fullyReplicatedNodes >= quorumNodes {
+							N = i
+						}
+					}
+
+					if N != -1 && N > rf.commitIndex {
+						if rf.log[N].Term == rf.currentTerm {
+							Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Leader: Signalling on CondVar to apply log entries, old commitIndex = %d, new commitIndex = %d, lastApplied = %d", rf.commitIndex, N, rf.lastApplied)
+
+							rf.commitIndex = N
+							rf.applyEntriesCondVar.Signal()
+						}
+					}
+				}
+
 				rf.mu.Unlock()
-				rf.applyLeaderLogEntries()
-				rf.mu.Lock()
+
+				return
 			} else if rf.nextIndex[followerPeerIndex] > 0 {
 				rf.nextIndex[followerPeerIndex] -= 1
-				log.Println("INVOKING APPENENTRIES RECURSIVELY")
+
+				rf.mu.Unlock()
 				rf.replicateLog(leaderPeerIndex, followerPeerIndex)
+
+				return
 			}
 		} else if rf.currentTerm < reply.Term {
-			rf.currentTerm = reply.Term
-			rf.currentRole = Follower
-			rf.votedFor = -1
-			rf.receivedHeartbeatOrVoteGrant = true
-
-			// me: setting length to 0 while retaining allocated memory
-			rf.votesReceived = rf.votesReceived[:0]
+			rf.mu.Unlock()
+			rf.transitionToFollower(reply.Term)
+			rf.mu.Lock()
 		}
 
 		rf.mu.Unlock()
@@ -604,53 +669,126 @@ func (rf *Raft) replicateLog(leaderPeerIndex int, followerPeerIndex int) {
 // me: handles an AppendEntries RPC
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
-	// log.Printf("Received AppendEntries RPC on node %d, node dead: %t", rf.me, rf.killed())
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Received AppendEntriesRPC from node = %d, with prevLogIndex = %d and PrevLogTerm = %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 
 	reply.Term = args.Term
 	reply.Success = false
 	rf.receivedHeartbeatOrVoteGrant = true
 
 	if args.Term > rf.currentTerm {
-		rf.votedFor = -1
-		rf.currentTerm = args.Term
+		rf.mu.Unlock()
+		rf.transitionToFollower(args.Term)
+		rf.mu.Lock()
+
+		rf.currentLeader = args.LeaderId
 	} else if args.Term < rf.currentTerm {
+		Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Received AppendEntriesRPC with older term from node = %d with term = %d, rejecting with latest term %d", args.LeaderId, args.Term, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		rf.receivedHeartbeatOrVoteGrant = false
+
+		rf.mu.Unlock()
 		return
-	}
-
-	if rf.commitIndex < args.LeaderCommit {
-		rf.commitIndex = args.LeaderCommit
-	}
-
-	if args.Term == rf.currentTerm {
-		rf.currentLeader = args.LeaderId
+	} else if args.Term == rf.currentTerm {
 		rf.currentRole = Follower
+		rf.currentLeader = args.LeaderId
 	}
 
 	if len(args.Entries) > 0 {
-		// log.Println("Receiving AppendEntries request for log append")
-		logOk := (args.PrevLogLength >= len(rf.log)) && (args.PrevLogLength == 0 || (args.PrevLogTerm >= rf.log[args.PrevLogLength-1].Term))
-
-		// log.Println("Receiving AppendEntries request for log append, logOk: ", logOk)
-		if rf.currentTerm == args.Term && logOk {
-			// log.Printf("Receiving AppendEntries request for prev log length of %d : Successful ", len(rf.log))
-			rf.mu.Unlock()
-			rf.addEntriesToLog(args.PrevLogLength, args.Entries)
-			rf.mu.Lock()
-			reply.Success = true
-			// log.Println("Receiving AppendEntries request for log append: Successful 2")
+		// length of the log = last index of the log
+		logIndex := -1
+		if len(rf.log) == 0 {
+			logIndex = 0
+		} else {
+			// me: len(rf.log) = sum of actual entries and the dummy log at index 0
+			logIndex = len(rf.log) - 1
 		}
+
+		// me: check if the log is longer or equal in length to expected length on leader to prevent out of bounds indexing
+		// if len == 0, entering body and avoiding indexing by short circuit (OR operator)
+		//
+		// if false, then reply.Success retains default value of false
+		// and nextIndex is decremented on leader, process continues until log lengths match
+		if logIndex >= args.PrevLogIndex || args.PrevLogIndex == 0 {
+
+			if args.PrevLogIndex == 0 {
+				if logIndex != 0 {
+					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Expected log length is 0, Node has index(length) = %d, Truncating to 0", logIndex)
+					rf.log = rf.log[:0]
+				}
+
+				// me: appending a dummy log at index 0
+				rf.log = append(rf.log, LogEntry{})
+
+				rf.log = append(rf.log, args.Entries...)
+
+				reply.Success = true
+				Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Prev Log Length = 0,  Entries have been appended, New length = %d", len(rf.log)-1)
+
+				if args.LeaderCommit > rf.commitIndex {
+					lastLogIndex := len(rf.log) - 1
+					rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(lastLogIndex)))
+					Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Follower: Signalling on CondVar to apply log entries, commitIndex = %d, lastApplied = %d", rf.commitIndex, rf.lastApplied)
+					rf.applyEntriesCondVar.Signal()
+				}
+
+			} else {
+
+				// me: if follower log is longer, truncate to current leader expected length
+				//
+				// Two cases
+				// 1. lastEntry has same term and index, entries can be safely appended
+				// 2. lastEntry is not as expected (different term)
+				//
+				// If entry is not as expected, delete entry with the default reply.Success value as false
+				// This decrements nextIndex on the leader and forces another round of AppendEntries
+
+				if logIndex > args.PrevLogIndex {
+					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Node has a greater log index = %d, truncating to expected log index = %d", logIndex, args.PrevLogIndex)
+					rf.log = rf.log[0 : args.PrevLogIndex+1]
+				}
+
+				if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
+					rf.log = append(rf.log, args.Entries...)
+
+					reply.Success = true
+					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Prev Log Length = %d,  Entries have been appended, New length = %d", args.PrevLogIndex, len(rf.log)-1)
+
+					if args.LeaderCommit > rf.commitIndex {
+						lastLogIndex := len(rf.log) - 1
+						rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(lastLogIndex)))
+						Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Follower: Signalling on CondVar to apply log entries, commitIndex = %d, lastApplied = %d", rf.commitIndex, rf.lastApplied)
+						rf.applyEntriesCondVar.Signal()
+					}
+
+				} else {
+					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Expected log term at log index %d is %d, Node has term = %d, deleting entry from node log", args.PrevLogIndex, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
+					rf.log = rf.log[:args.PrevLogIndex] // truncates to arg.PrevLogIndex-1
+				}
+			}
+
+		} // end of if which checks if follower log is shorter
+
 	} else {
+
+		// me: len(args.Entries) == 0 (empty heartbeats)
+		// no need to check logs
 		reply.Success = true
+
+		if args.LeaderCommit > rf.commitIndex {
+			if len(rf.log) >= 2 {
+				lastLogIndex := len(rf.log) - 1
+				rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(lastLogIndex)))
+				Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Follower: Signalling on CondVar to apply log entries, commitIndex = %d, lastApplied = %d", rf.commitIndex, rf.lastApplied)
+				rf.applyEntriesCondVar.Signal()
+			}
+		}
 	}
 
-	go rf.applyFollowerLogEntries()
+	rf.mu.Unlock()
 }
 
-// me: This function appends and entry to the leader's log and broadcasts it to all nodes
+// me: This function appends an entry to the leader's log and broadcasts it to all nodes
 func (rf *Raft) performLogBroadcast(command interface{}) {
 	rf.mu.Lock()
 
@@ -659,108 +797,68 @@ func (rf *Raft) performLogBroadcast(command interface{}) {
 		Command: command,
 	}
 
+	// me: appending a dummy LogEntry at index 0
+	// indexing in the log starts from 1 (according to the paper)
 	if len(rf.log) == 0 {
 		rf.log = append(rf.log, LogEntry{})
 	}
+
 	rf.log = append(rf.log, logEntry)
 	rf.nextIndex[rf.me] = len(rf.log)
+	rf.matchIndex[rf.me] = len(rf.log) - 1
 
 	rf.mu.Unlock()
 
 	for node := range rf.peers {
 		if node != rf.me {
-			// me: Sending concurrent log repliaction requests to all nodes
+			// me: Sending concurrent log replication requests to all nodes
+			// sending in parallel as recommended in the paper and labs
 			go rf.replicateLog(rf.me, node)
 		}
 	}
 }
 
-// me: This function adds or tuncates entries to followers log accordingly
-func (rf *Raft) addEntriesToLog(PrevLogLength int, suffixEntries []LogEntry) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+// me: This function commits log entries to the state machine
+// Using a condition variable to determine when entries must be applied
+func (rf *Raft) applyLogEntries() {
 
-	// me: ensuring the existing log entries in the follower are identical to that of the leader
-	// me: if the logs do not match, truncate it
-	if len(rf.log) > PrevLogLength {
-		lowIndex := int(math.Min(float64(len(rf.log)), float64(PrevLogLength+len(suffixEntries))) - 1)
-		if rf.log[lowIndex].Term != suffixEntries[lowIndex-PrevLogLength].Term {
-			rf.log = rf.log[:PrevLogLength-1]
-		}
-	}
+	for !rf.killed() {
+		rf.mu.Lock()
 
-	// me: appending new entries to the follower's log
-	if PrevLogLength+len(suffixEntries) > len(rf.log) {
-		// log.Printf("Adding entry to log on node: %d", rf.me)
-		for i := len(rf.log) - PrevLogLength; i < len(suffixEntries); i++ {
-			rf.log = append(rf.log, suffixEntries[i])
-		}
-	}
+		rf.applyEntriesCondVar.Wait()
 
-}
+		if rf.commitIndex > rf.lastApplied {
+			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				applyMsg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[i].Command,
+					CommandIndex: i,
+				}
 
-// me: This function commits log entries on the leader
-// for the leader, lastApplied == commitIndex as commitIndex is calculated in the this function
-func (rf *Raft) applyLeaderLogEntries() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	latestCommit := -1
-	quorumNodes := int(math.Ceil(float64(len(rf.peers)+1) / 2))
-	for i := 1; i < len(rf.log); i++ {
-		updatedNodes := 0
-
-		for j := 0; j < len(rf.peers); j++ {
-			if rf.matchIndex[j] >= i {
-				updatedNodes++
-			}
-		}
-
-		if updatedNodes >= quorumNodes {
-			// log.Printf("Updating latestCommit from %d to %d", latestCommit, i)
-			latestCommit = i
-		} else {
-			// log.Printf("Unable to update latestCommit from %d to %d, updatedNodes: %d", latestCommit, i, updatedNodes)
-		}
-	}
-
-	log.Printf("LEADER: Quorum: %d, latestCommit: %d, rf.commitIndex: %d, len(rf.log): %d", quorumNodes, latestCommit, rf.commitIndex, len(rf.log))
-	if latestCommit != -1 && latestCommit > rf.commitIndex && rf.log[latestCommit].Term == rf.currentTerm {
-		for i := rf.commitIndex + 1; i <= latestCommit; i++ {
-			applyMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[i].Command,
-				CommandIndex: i,
+				*rf.applyChChan <- applyMsg
+				rf.lastApplied = i
+				Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Applied log entry, commitIndex = %d, lastApplied = %d, command = %+v", rf.commitIndex, rf.lastApplied, rf.log[i].Command)
 			}
 
-			*rf.applyChChan <- applyMsg
-			log.Printf("Applied %d to leader %d ", i, rf.me)
 		}
 
-		rf.commitIndex = latestCommit
-		rf.lastApplied = latestCommit
+		rf.mu.Unlock()
 	}
 }
 
-// me: committing log entries committed by the leader on follower nodes
-func (rf *Raft) applyFollowerLogEntries() {
+func (rf *Raft) transitionToFollower(newTerm int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	log.Printf("Starting entry application on follower %d, rf.commitIndex: %d, rf.lastApplied: %d", rf.me, rf.commitIndex, rf.lastApplied)
+	rf.currentTerm = newTerm
+	rf.votedFor = -1
 
-	if rf.commitIndex > rf.lastApplied && len(rf.log) > rf.commitIndex {
-		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			applyMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[i].Command,
-				CommandIndex: i,
-			}
+	// me: setting length to 0 while retaining allocated memory
+	rf.nextIndex = rf.nextIndex[:0]
+	rf.matchIndex = rf.matchIndex[:0]
 
-			*rf.applyChChan <- applyMsg
-			log.Printf("Committed %d to node %d ", i, rf.me)
-		}
-
-		rf.lastApplied = rf.commitIndex
-	}
+	rf.receivedHeartbeatOrVoteGrant = true
+	rf.currentRole = Follower
+	rf.currentLeader = -1
+	rf.votesReceived = rf.votesReceived[:0]
 }

@@ -1,6 +1,6 @@
 # MIT 6.5840 Distributed Systems Labs
 
-A series of labs accompanying the [coursework on distributed systems](https://pdos.csail.mit.edu/6.824/index.html).
+A series of labs accompanying the [coursework on distributed systems](https://pdos.csail.mit.edu/6.824/index.html), including a Raft implementation.
 This repo holds my solutions to these labs.
 
 ## Labs
@@ -24,9 +24,28 @@ The solution is present in `raft/raft.go`
 Implement Raft leader election and heartbeats.
 The goal for Part 3A is for a single leader to be elected, for the leader to remain the leader if there are no failures, and for a new leader to take over if the old leader fails or if packets to/from the old leader are lost.
 
-The solution passes all tests.
+The solution passes all tests:
 
----
+- ✅ Initial election
+- ✅ Election after network failure
+- ✅ Multiple elections
+
+#### 3B: Log Replication (WIP)
+
+Implement the leader and follower code to append new log entries
+
+The solution passes the following tests:
+
+- ✅ basic agreement
+- ✅ RPC byte count
+- ✅ Test progressive failure of followers
+- ✅ Test failure of leaders
+- ✅ Agreement after follower reconnects
+- ✅ No agreement if too many followers disconnect
+- ❌ Concurrent Start()s
+- ❌ Rejoin of partitioned leader
+- ❌ Leader backs up quickly over incorrect follower logs
+- ⏳ RPC counts aren't too high
 
 ## Note
 
