@@ -234,7 +234,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		if args.Term > rf.currentTerm {
 			rf.mu.Unlock()
-			rf.transitionToFollower(args.Term)
+			rf.transitionToHigherTerm(args.Term)
 			rf.mu.Lock()
 		}
 
@@ -525,7 +525,7 @@ func (rf *Raft) PerformVoteRequest(targetPeerIndex int, args *RequestVoteArgs) {
 
 	} else if reply.Term > rf.currentTerm {
 		rf.mu.Unlock()
-		rf.transitionToFollower(reply.Term)
+		rf.transitionToHigherTerm(reply.Term)
 		return
 	}
 
@@ -604,7 +604,6 @@ func (rf *Raft) replicateLog(leaderPeerIndex int, followerPeerIndex int) {
 		rf.mu.Lock()
 
 		if rf.currentTerm == reply.Term && rf.currentRole == Leader && len(args.Entries) > 0 {
-			Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Received reply to AppendEntriesRPC is %+v for PrevLogIndex = %d, PrevLogTerm = %d", reply, args.PrevLogIndex, args.PrevLogTerm)
 			if reply.Success {
 
 				rf.matchIndex[followerPeerIndex] = args.PrevLogIndex + len(args.Entries)
@@ -658,7 +657,7 @@ func (rf *Raft) replicateLog(leaderPeerIndex int, followerPeerIndex int) {
 			}
 		} else if rf.currentTerm < reply.Term {
 			rf.mu.Unlock()
-			rf.transitionToFollower(reply.Term)
+			rf.transitionToHigherTerm(reply.Term)
 			rf.mu.Lock()
 		}
 
@@ -673,116 +672,101 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Received AppendEntriesRPC from node = %d, with prevLogIndex = %d and PrevLogTerm = %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
 
 	reply.Term = args.Term
-	reply.Success = false
+	reply.Success = true
 	rf.receivedHeartbeatOrVoteGrant = true
 
 	if args.Term > rf.currentTerm {
+		Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Rejecting AppendEntries with args.Term = %d, rf.currentTerm = %d", args.Term, rf.currentTerm)
 		rf.mu.Unlock()
-		rf.transitionToFollower(args.Term)
+		rf.transitionToHigherTerm(args.Term)
 		rf.mu.Lock()
 
 		rf.currentLeader = args.LeaderId
 	} else if args.Term < rf.currentTerm {
+
+		// Reply false if term<currentTerm (§5.1)
 		Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Received AppendEntriesRPC with older term from node = %d with term = %d, rejecting with latest term %d", args.LeaderId, args.Term, rf.currentTerm)
 		reply.Term = rf.currentTerm
+		reply.Success = false
 		rf.receivedHeartbeatOrVoteGrant = false
 
 		rf.mu.Unlock()
 		return
+
 	} else if args.Term == rf.currentTerm {
 		rf.currentRole = Follower
 		rf.currentLeader = args.LeaderId
 	}
 
-	if len(args.Entries) > 0 {
-		// length of the log = last index of the log
-		logIndex := -1
-		if len(rf.log) == 0 {
-			logIndex = 0
-		} else {
-			// me: len(rf.log) = sum of actual entries and the dummy log at index 0
-			logIndex = len(rf.log) - 1
-		}
+	// if len(args.Entries) > 0 {
+	// length of the log = last index of the log
+	lastLogIndex := -1
+	if len(rf.log) == 0 {
+		lastLogIndex = 0
+	} else {
+		// me: len(rf.log) = sum of actual entries and the dummy log at index 0
+		lastLogIndex = len(rf.log) - 1
+	}
 
-		// me: check if the log is longer or equal in length to expected length on leader to prevent out of bounds indexing
-		// if len == 0, entering body and avoiding indexing by short circuit (OR operator)
-		//
-		// if false, then reply.Success retains default value of false
-		// and nextIndex is decremented on leader, process continues until log lengths match
-		if logIndex >= args.PrevLogIndex || args.PrevLogIndex == 0 {
+	// me: check if the log is longer or equal in length to expected length on leader to prevent out of bounds indexing
+	// if len == 0, entering body and avoiding indexing by short circuit (OR operator)
+	//
+	// if false, then reply.Success retains default value of false
+	// and nextIndex is decremented on leader, process continues until log lengths match
+	if lastLogIndex >= args.PrevLogIndex {
+		if args.PrevLogIndex > 0 {
 
-			if args.PrevLogIndex == 0 {
-				if logIndex != 0 {
-					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Expected log length is 0, Node has index(length) = %d, Truncating to 0", logIndex)
+			// If an existing entry conflicts with a new one (same index
+			// but different terms),delete the existing entry and all that
+			// follow it (§5.3)
+			if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+				Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Truncating log as terms do not match from lastIndex = %d to PrevLogIndex - 1 = %d", lastLogIndex, args.PrevLogIndex-1)
+				rf.log = rf.log[:args.PrevLogIndex] //truncating log to 0-args.PrevLogIndex-1
+				if len(rf.log) == 1 {
 					rf.log = rf.log[:0]
 				}
 
-				// me: appending a dummy log at index 0
-				rf.log = append(rf.log, LogEntry{})
-
-				rf.log = append(rf.log, args.Entries...)
-
-				reply.Success = true
-				Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Prev Log Length = 0,  Entries have been appended, New length = %d", len(rf.log)-1)
-
-				if args.LeaderCommit > rf.commitIndex {
-					lastLogIndex := len(rf.log) - 1
-					rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(lastLogIndex)))
-					Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Follower: Signalling on CondVar to apply log entries, commitIndex = %d, lastApplied = %d", rf.commitIndex, rf.lastApplied)
-					rf.applyEntriesCondVar.Signal()
-				}
-
-			} else {
-
-				// me: if follower log is longer, truncate to current leader expected length
-				//
-				// Two cases
-				// 1. lastEntry has same term and index, entries can be safely appended
-				// 2. lastEntry is not as expected (different term)
-				//
-				// If entry is not as expected, delete entry with the default reply.Success value as false
-				// This decrements nextIndex on the leader and forces another round of AppendEntries
-
-				if logIndex > args.PrevLogIndex {
-					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Node has a greater log index = %d, truncating to expected log index = %d", logIndex, args.PrevLogIndex)
-					rf.log = rf.log[0 : args.PrevLogIndex+1]
-				}
-
-				if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
-					rf.log = append(rf.log, args.Entries...)
-
-					reply.Success = true
-					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Prev Log Length = %d,  Entries have been appended, New length = %d", args.PrevLogIndex, len(rf.log)-1)
-
-					if args.LeaderCommit > rf.commitIndex {
-						lastLogIndex := len(rf.log) - 1
-						rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(lastLogIndex)))
-						Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Follower: Signalling on CondVar to apply log entries, commitIndex = %d, lastApplied = %d", rf.commitIndex, rf.lastApplied)
-						rf.applyEntriesCondVar.Signal()
-					}
-
-				} else {
-					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Expected log term at log index %d is %d, Node has term = %d, deleting entry from node log", args.PrevLogIndex, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
-					rf.log = rf.log[:args.PrevLogIndex] // truncates to arg.PrevLogIndex-1
-				}
-			}
-
-		} // end of if which checks if follower log is shorter
-
-	} else {
-
-		// me: len(args.Entries) == 0 (empty heartbeats)
-		// no need to check logs
-		reply.Success = true
-
-		if args.LeaderCommit > rf.commitIndex {
-			if len(rf.log) >= 2 {
-				lastLogIndex := len(rf.log) - 1
-				rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(lastLogIndex)))
-				Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Follower: Signalling on CondVar to apply log entries, commitIndex = %d, lastApplied = %d", rf.commitIndex, rf.lastApplied)
-				rf.applyEntriesCondVar.Signal()
+				// Reply false if log doesn’t contain an entry at prevLogIndex
+				// whose term matches prevLogTerm (§5.3)
+				reply.Success = false
+				rf.mu.Unlock()
+				return
 			}
 		}
+
+		if len(args.Entries) > 0 {
+			if lastLogIndex > args.PrevLogIndex {
+				if lastLogIndex == 0 {
+					panic("[AppendEntries] LastLogIndex = 0 and greater than args.PrevLogIndex")
+				}
+
+				for i := lastLogIndex - args.PrevLogIndex; i < len(args.Entries); i++ {
+					rf.log = append(rf.log, args.Entries[i])
+					Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Appending entries to log, old index = %d, new index = %d", lastLogIndex, len(rf.log)-1)
+				}
+			} else {
+				if lastLogIndex == 0 {
+					rf.log = append(rf.log, LogEntry{})
+				}
+
+				rf.log = append(rf.log, args.Entries...)
+				Debug(rf.debugStartTime, dAppendEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Appending entries to log, old index = %d, new index = %d", lastLogIndex, len(rf.log)-1)
+			}
+		}
+	} else {
+		reply.Success = false
+	} // end of if which checks if follower log is shorter
+
+	// If leaderCommit > commitIndex, setcommitIndex =
+	// min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		lastLogIndex := len(rf.log) - 1
+		if lastLogIndex < 0 {
+			lastLogIndex = 0
+		}
+		rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(lastLogIndex)))
+		Debug(rf.debugStartTime, dApplyLogEntries, rf.me, rf.GetCurrentRole(rf.currentRole), "Follower: Signalling on CondVar to apply log entries, commitIndex = %d, lastApplied = %d", rf.commitIndex, rf.lastApplied)
+		rf.applyEntriesCondVar.Signal()
 	}
 
 	rf.mu.Unlock()
@@ -846,7 +830,7 @@ func (rf *Raft) applyLogEntries() {
 	}
 }
 
-func (rf *Raft) transitionToFollower(newTerm int) {
+func (rf *Raft) transitionToHigherTerm(newTerm int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
