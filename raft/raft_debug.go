@@ -13,6 +13,7 @@ const (
 	dVote               LogTopic = "Vote"
 	dRequestVoteHandler LogTopic = "RequestVoteHandler"
 	dAppendEntries      LogTopic = "AppendEntriesRPC"
+	dCommitIndex        LogTopic = "UpdateCommitIndex"
 	dApplyLogEntries    LogTopic = "ApplyLogEntries"
 	dReplicateLog       LogTopic = "ReplicateLog()"
 	dPersist            LogTopic = "Persist"

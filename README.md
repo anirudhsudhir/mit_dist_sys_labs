@@ -41,11 +41,23 @@ The solution passes the following tests:
 - ✅ Test progressive failure of followers
 - ✅ Test failure of leaders
 - ✅ Agreement after follower reconnects
-- ❌ No agreement if too many followers disconnect
+- ✅ No agreement if too many followers disconnect
 - ❌ Concurrent Start()s
-- ❌ Rejoin of partitioned leader
-- ❌ Leader backs up quickly over incorrect follower logs
-- ⏳ RPC counts aren't too high
+- ✅ Rejoin of partitioned leader
+- ✅ Leader backs up quickly over incorrect follower logs
+- ❌ RPC counts aren't too high
+
+#### 3C: Persistence (WIP)
+
+Store Raft's persistent state to survive a reboot and resume service where it
+left off.
+
+The solution passes the following tests:
+
+- ✅ Basic Persistence
+- ❌ Remaining Tests
+
+---
 
 ## Note
 
