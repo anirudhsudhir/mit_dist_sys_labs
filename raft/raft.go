@@ -338,13 +338,30 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 
 	if rf.currentRole == Leader {
+		logEntry := LogEntry{
+			Term:    rf.persistentState.CurrentTerm,
+			Command: command,
+		}
 
-		index = rf.commitIndex + 1
+		// me: appending a dummy LogEntry at index 0
+		// indexing in the log starts from 1 (according to the paper)
+		if len(rf.persistentState.Log) == 0 {
+			rf.persistentState.Log = append(rf.persistentState.Log, LogEntry{})
+		}
+
+		rf.persistentState.Log = append(rf.persistentState.Log, logEntry)
+
+		rf.persist()
+
+		rf.nextIndex[rf.me] = len(rf.persistentState.Log)
+		rf.matchIndex[rf.me] = len(rf.persistentState.Log) - 1
+
+		go rf.performLogBroadcast()
+
+		index = rf.matchIndex[rf.me]
 		term = rf.persistentState.CurrentTerm
 		isLeader = true
 		Debug(rf.debugStartTime, dStart, rf.me, GetCurrentRole(rf.currentRole), "Starting agreement on new entry, cmd = %+v", command)
-
-		go rf.performLogBroadcast(command)
 	}
 
 	rf.mu.Unlock()
@@ -623,7 +640,7 @@ func (rf *Raft) replicateLog(leaderPeerIndex int, followerPeerIndex int) {
 		}
 	}
 
-	Debug(rf.debugStartTime, dAppendEntries, rf.me, GetCurrentRole(rf.currentRole), "Sending AppendEntriesRPC to node %d with PrevLogIndex = %d, PrevLogTerm = %d", followerPeerIndex, args.PrevLogIndex, args.PrevLogTerm)
+	Debug(rf.debugStartTime, dAppendEntries, rf.me, GetCurrentRole(rf.currentRole), "Sending AppendEntriesRPC to node %d with PrevLogIndex = %d, PrevLogTerm = %d, logs = %+v", followerPeerIndex, args.PrevLogIndex, args.PrevLogTerm, rf.persistentState.Log)
 	rf.mu.Unlock()
 
 	receivedReply := rf.peers[followerPeerIndex].Call("Raft.AppendEntries", args, &reply)
@@ -815,34 +832,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.applyEntriesCondVar.Signal()
 	}
 
-	Debug(rf.debugStartTime, dAppendEntries, rf.me, GetCurrentRole(rf.currentRole), "AppendEntriesRPC handled from node = %d, with prevLogIndex = %d and PrevLogTerm = %d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm)
+	Debug(rf.debugStartTime, dAppendEntries, rf.me, GetCurrentRole(rf.currentRole), "AppendEntriesRPC handled from node = %d, with prevLogIndex = %d and PrevLogTerm = %d, logs = %+v", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.persistentState.Log)
 	rf.mu.Unlock()
 }
 
 // me: This function appends an entry to the leader's log and broadcasts it to all nodes
-func (rf *Raft) performLogBroadcast(command interface{}) {
-	rf.mu.Lock()
-
-	logEntry := LogEntry{
-		Term:    rf.persistentState.CurrentTerm,
-		Command: command,
-	}
-
-	// me: appending a dummy LogEntry at index 0
-	// indexing in the log starts from 1 (according to the paper)
-	if len(rf.persistentState.Log) == 0 {
-		rf.persistentState.Log = append(rf.persistentState.Log, LogEntry{})
-	}
-
-	rf.persistentState.Log = append(rf.persistentState.Log, logEntry)
-
-	rf.persist()
-
-	rf.nextIndex[rf.me] = len(rf.persistentState.Log)
-	rf.matchIndex[rf.me] = len(rf.persistentState.Log) - 1
-
-	rf.mu.Unlock()
-
+func (rf *Raft) performLogBroadcast() {
 	for node := range rf.peers {
 		if node != rf.me {
 			// me: Sending concurrent log replication requests to all nodes

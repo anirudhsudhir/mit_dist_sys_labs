@@ -30,7 +30,7 @@ The solution passes all tests:
 - ✅ Election after network failure
 - ✅ Multiple elections
 
-#### 3B: Log Replication (WIP)
+#### 3B: Log Replication
 
 Implement the leader and follower code to append new log entries
 
@@ -42,10 +42,10 @@ The solution passes the following tests:
 - ✅ Test failure of leaders
 - ✅ Agreement after follower reconnects
 - ✅ No agreement if too many followers disconnect
-- ❌ Concurrent Start()s
+- ✅ Concurrent Start()s
 - ✅ Rejoin of partitioned leader
 - ✅ Leader backs up quickly over incorrect follower logs
-- ❌ RPC counts aren't too high
+- ✅+❌ RPC counts aren't too high (Fails sometimes)
 
 #### 3C: Persistence (WIP)
 
@@ -55,7 +55,13 @@ left off.
 The solution passes the following tests:
 
 - ✅ Basic Persistence
-- ❌ Remaining Tests
+- ✅ More Persistence
+- ✅ Partitioned leader and one follower crash, leader restarts
+- ✅+❌ Figure 8 (Fails sometimes)
+- ✅ Unreliable agreement
+- ❌ Figure 8 (unreliable)
+- ✅+❌ Churn
+- ✅+❌ Unreliable churn
 
 ---
 
