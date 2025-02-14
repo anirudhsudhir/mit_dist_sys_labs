@@ -49,7 +49,6 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.5840/labgob"
 import "bytes"
 import "reflect"
 import "sync"
@@ -58,6 +57,8 @@ import "strings"
 import "math/rand"
 import "time"
 import "sync/atomic"
+
+import "github.com/anirudhsudhir/mit_dist_sys_labs/labgob"
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd

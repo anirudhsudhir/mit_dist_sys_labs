@@ -1,3 +1,3 @@
-module 6.5840
+module github.com/anirudhsudhir/mit_dist_sys_labs
 
-go 1.22.2
+go 1.24.0

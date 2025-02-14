@@ -29,9 +29,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
-	"6.5840/labgob"
-	"6.5840/labrpc"
+	"github.com/anirudhsudhir/mit_dist_sys_labs/labgob"
+	"github.com/anirudhsudhir/mit_dist_sys_labs/labrpc"
 )
 
 // as each Raft peer becomes aware that successive log entries are

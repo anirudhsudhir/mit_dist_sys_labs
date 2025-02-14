@@ -5,7 +5,7 @@ import (
 	"math/big"
 	"sync"
 
-	"6.5840/labrpc"
+	"github.com/anirudhsudhir/mit_dist_sys_labs/labrpc"
 )
 
 type Clerk struct {

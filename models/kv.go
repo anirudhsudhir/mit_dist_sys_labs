@@ -1,8 +1,9 @@
 package models
 
-import "6.5840/porcupine"
 import "fmt"
 import "sort"
+
+import "github.com/anirudhsudhir/mit_dist_sys_labs/porcupine"
 
 type KvInput struct {
 	Op    uint8 // 0 => get, 1 => put, 2 => append

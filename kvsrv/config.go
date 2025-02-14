@@ -1,10 +1,8 @@
 package kvsrv
 
-import "6.5840/labrpc"
 import "testing"
 import "os"
 
-//import "log"
 import crand "crypto/rand"
 import "math/big"
 import "math/rand"
@@ -14,6 +12,8 @@ import "runtime"
 import "fmt"
 import "time"
 import "sync/atomic"
+
+import "github.com/anirudhsudhir/mit_dist_sys_labs/labrpc"
 
 const SERVERID = 0
 

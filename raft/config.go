@@ -8,8 +8,6 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.5840/labgob"
-import "6.5840/labrpc"
 import "bytes"
 import "log"
 import "sync"
@@ -22,6 +20,9 @@ import "math/big"
 import "encoding/base64"
 import "time"
 import "fmt"
+
+import "github.com/anirudhsudhir/mit_dist_sys_labs/labgob"
+import "github.com/anirudhsudhir/mit_dist_sys_labs/labrpc"
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
