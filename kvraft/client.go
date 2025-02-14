@@ -1,13 +1,20 @@
 package kvraft
 
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
 
-import "github.com/anirudhsudhir/mit_dist_sys_labs/labrpc"
+	"github.com/anirudhsudhir/mit_dist_sys_labs/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+
+	// me:
+	currentAssumedLeader int
+
+	debugStartTime time.Time
 }
 
 func nrand() int64 {
@@ -20,7 +27,10 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+
+	ck.currentAssumedLeader = -1
+	ck.debugStartTime = time.Now()
+
 	return ck
 }
 
@@ -35,8 +45,35 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
+	args := GetArgs{
+		key,
+	}
+	reply := GetReply{}
+	ok := false
 
-	// You will have to modify this function.
+	if ck.currentAssumedLeader != -1 {
+		DebugClerk(ck.debugStartTime, dGetKeyClerk, "Sending a Get RPC to Node = %d, args = %+v", ck.currentAssumedLeader, args)
+		ok = ck.servers[ck.currentAssumedLeader].Call("KVServer.Get", &args, &reply)
+		if ok && reply.Err != ErrWrongLeader {
+			DebugClerk(ck.debugStartTime, dGetKeyClerk, "Get RPC successful, Node = %d, Args = %+v, Reply = %+v", ck.currentAssumedLeader, args, reply)
+			return reply.Value
+		}
+	}
+
+	// me: send RPCs to all nodes until successful if no current assumed leader or RPC fails
+	for {
+		for i, server := range ck.servers {
+			DebugClerk(ck.debugStartTime, dGetKeyClerk, "Sending a Get RPC to Node = %d, args = %+v", i, args)
+			ok = server.Call("KVServer.Get", &args, &reply)
+			if ok && reply.Err != ErrWrongLeader {
+				ck.currentAssumedLeader = i
+				DebugClerk(ck.debugStartTime, dGetKeyClerk, "Get RPC successful, Node = %d, Args = %+v, Reply = %+v", ck.currentAssumedLeader, args, reply)
+				return reply.Value
+			}
+		}
+	}
+
+	DebugClerk(ck.debugStartTime, dGetKeyClerk, "Get RPC failed, Args = %+v, Reply = %+v", args, reply)
 	return ""
 }
 
@@ -49,7 +86,71 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := PutAppendArgs{
+		key,
+		value,
+	}
+
+	reply := PutAppendReply{}
+	ok := false
+
+	switch op {
+	case "Put":
+
+		if ck.currentAssumedLeader != -1 {
+			DebugClerk(ck.debugStartTime, dPutKeyClerk, "Sending a Put RPC to Node = %d, args = %+v", ck.currentAssumedLeader, args)
+			ok = ck.servers[ck.currentAssumedLeader].Call("KVServer.Put", &args, &reply)
+			if ok && reply.Err != ErrWrongLeader {
+				DebugClerk(ck.debugStartTime, dPutKeyClerk, "Put RPC successful, Node = %d, args = %+v", ck.currentAssumedLeader, args)
+				return
+			}
+		}
+
+		// me: send RPCs to all nodes until successful if no current assumed leader or RPC fails
+		for {
+			for i, server := range ck.servers {
+				DebugClerk(ck.debugStartTime, dPutKeyClerk, "Sending a Put RPC to Node = %d, args = %+v", i, args)
+				ok = server.Call("KVServer.Put", &args, &reply)
+				if ok && reply.Err != ErrWrongLeader {
+					ck.currentAssumedLeader = i
+					DebugClerk(ck.debugStartTime, dPutKeyClerk, "Put RPC successful, Node = %d, args = %+v", i, args)
+					return
+				}
+			}
+		}
+
+		DebugClerk(ck.debugStartTime, dPutKeyClerk, "Put RPC failed, Args = %+v, Reply = %+v", args, reply)
+
+	case "Append":
+
+		if ck.currentAssumedLeader != -1 {
+			DebugClerk(ck.debugStartTime, dAppendKeyClerk, "Sending a Append RPC to Node = %d, args = %+v", ck.currentAssumedLeader, args)
+			ok = ck.servers[ck.currentAssumedLeader].Call("KVServer.Append", &args, &reply)
+			if ok && reply.Err != ErrWrongLeader {
+				DebugClerk(ck.debugStartTime, dAppendKeyClerk, "Append RPC successful, Node = %d, args = %+v", ck.currentAssumedLeader, args)
+				return
+			}
+		}
+
+		// me: send RPCs to all nodes until successful if no current assumed leader or RPC fails
+		for {
+			for i, server := range ck.servers {
+				DebugClerk(ck.debugStartTime, dAppendKeyClerk, "Sending a AppendPut  RPC to Node = %d, args = %+v", i, args)
+				ok = server.Call("KVServer.Append", &args, &reply)
+				if ok && reply.Err != ErrWrongLeader {
+					ck.currentAssumedLeader = i
+					DebugClerk(ck.debugStartTime, dAppendKeyClerk, "Append RPC successful, Node = %d, args = %+v", i, args)
+					return
+				}
+			}
+		}
+
+		DebugClerk(ck.debugStartTime, dAppendKeyClerk, "Append RPC failed, Args = %+v, Reply = %+v", args, reply)
+
+	default:
+
+		DebugClerk(ck.debugStartTime, dInvalidPutAppendOp, "Invalid Put/Append operation, args = %+v", args)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
