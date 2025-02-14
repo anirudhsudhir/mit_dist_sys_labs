@@ -63,6 +63,21 @@ The solution passes the following tests:
 - ✅+❌ Churn
 - ✅+❌ Unreliable churn
 
+### 4. Fault-tolerant Key/Value Service
+
+This lab involves building a fault-tolerant key/value storage service using the Raft library from Lab 3
+
+The solution is present in `kvraft/{client.go, common.go, server.go,
+kvraft_debug.go}`
+
+#### 4A: Key/value service without snapshots (WIP)
+
+The solution passes the following tests:
+
+- ✅ One Client
+- ✅ Ops complete fast enough
+- ❌ Remaining Tests
+
 ---
 
 ## Note

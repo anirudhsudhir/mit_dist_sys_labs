@@ -337,6 +337,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 
 	if rf.currentRole == Leader {
+		Debug(rf.debugStartTime, dStart, rf.me, GetCurrentRole(rf.currentRole), "Received a new Entry to start consensus = %+v", command)
 		logEntry := LogEntry{
 			Term:    rf.persistentState.CurrentTerm,
 			Command: command,
@@ -397,7 +398,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 200 and 400 ms
 		// me: Wait for heartbeat or RequestVope RPCs
-		ms := 200 + (rand.Int63() % 200)
+		ms := 400 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
 		// me: if current server is the leader, prevent election start
@@ -408,7 +409,7 @@ func (rf *Raft) ticker() {
 		for serverRole == Leader && !rf.killed() {
 			// me: Sleep for 200 to 400 ms before checking if current node is leader
 			// me: if current node is leader, repeat process
-			ms := 200 + (rand.Int63() % 200)
+			ms := 400 + (rand.Int63() % 200)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 
 			rf.mu.Lock()
@@ -462,7 +463,7 @@ func (rf *Raft) ticker() {
 			}
 
 			// me: Election timeout - Waits for a round of election for 100 to 200ms
-			electionTimer := 100 + (rand.Int63() % 200)
+			electionTimer := 200 + (rand.Int63() % 200)
 			time.Sleep(time.Duration(electionTimer) * time.Millisecond)
 
 			rf.mu.Lock()
@@ -515,6 +516,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// me: applying entries to the state machine in a separate goroutine
 	go rf.applyLogEntries()
 
+	Debug(rf.debugStartTime, dMake, rf.me, GetCurrentRole(rf.currentRole), "Created new raft instance")
 	return rf
 }
 
