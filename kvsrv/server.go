@@ -1,19 +1,9 @@
 package kvsrv
 
 import (
-	"log"
 	"strings"
 	"sync"
 )
-
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
 
 type KVServer struct {
 	mu sync.Mutex
